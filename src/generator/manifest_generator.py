@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 
 from s3_path_fetcher import S3PathProcessor
-from parquet_indexer import ManifestGenerator
+from parquet_indexer import GeneTissueManifestGenerator
 
 # Configure logging
 logging.basicConfig(
@@ -27,7 +27,7 @@ def generate_manifest(source_bucket: str, source_prefix: str, output_file: str, 
         output_file=s3_files_list_path
     )
 
-    manifest_generator =  ManifestGenerator(
+    manifest_generator =  GeneTissueManifestGenerator(
         pattern=r'.*/v1/ad/([^/]+)/model_tissue_(\d+)\.tl$'
     )
     manifest_generator.generate_parquet_file(
