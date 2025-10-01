@@ -1,0 +1,75 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "data-access-optimizer"
+version = "0.1.0"
+description = "A tool for optimizing data access through parquet manifest"
+authors = [
+    {name = "Manasa Venkatakrishnan"}
+]
+readme = "README.md"
+requires-python = ">=3.12"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "boto3",
+    "pandas",
+    "pyarrow",
+    "duckdb",
+    "jupyter",
+    "notebook>=7.4.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0",
+    "pytest-cov",
+    "black",
+    "isort",
+    "flake8",
+    "mypy",
+]
+
+[project.scripts]
+manifest-generator = "src.generator.parquet_indexer:main"
+s3-path-fetcher = "src.generator.s3_path_fetcher:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.black]
+line-length = 88
+target-version = ["py312"]
+
+[tool.isort]
+profile = "black"
+multi_line_output = 3
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=6.0",
+    "pytest-cov",
+    "black",
+    "isort", 
+    "flake8",
+    "mypy",
+]
+
+[tool.uv.workspace]
+members = [
+    "data-access-optimizer",
+]
