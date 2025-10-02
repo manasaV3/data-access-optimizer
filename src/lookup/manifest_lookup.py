@@ -4,10 +4,8 @@ ManifestLookup class for querying gene and tissue data from parquet file.
 """
 
 import logging
-import os.path
 
-import boto3
-import duckdb
+from parquet_lookup import ParquetLookup
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +20,7 @@ class Record:
         return f"Record(gene_id={self.gene_id}, tissue_id={self.tissue_id}, file_path={self.file_path})"
 
 
-class ManifestLookup:
+class ManifestLookup(ParquetLookup):
     """
     A class to perform lookups on parquet files containing gene_id, tissue_id, and file_path data.
 
@@ -46,19 +44,32 @@ class ManifestLookup:
             FileNotFoundError: If the parquet file doesn't exist
             ValueError: If the parquet file doesn't have required columns
         """
+        super().__init__(manifest_file_path, tmp_dir or "/tmp/data_lookup_v1/", aws_credentials)
 
-        self.tmp_dir = tmp_dir or "/tmp/data_lookup_v1/"
+    def _get_table_name(self) -> str:
+        """Return the table name to use in DuckDB."""
+        return "manifest"
 
-        if manifest_file_path.startswith("s3://"):
-            manifest_file_path_split = manifest_file_path.split("/")
-            self.bucket = manifest_file_path_split[2]
-            self.manifest_file_path = "/".join(manifest_file_path_split[3:])
-        else:
-            self.bucket = None
-            self.manifest_file_path = manifest_file_path
-        self.s3 = boto3.client("s3", **(aws_credentials or {}))
-        self._load_file()
-        self._load_data()
+    def _get_required_columns(self) -> list[str]:
+        """Return the set of required columns for this lookup type."""
+        return ['tissue_id', 'gene_id', 'file_path']
+
+    def _get_queryable_columns(self) -> set[str]:
+        return {'gene_id', 'tissue_id'}
+
+    def _create_indexes(self, table_name: str):
+        """Create appropriate indexes for the table."""
+        self.con.execute(f"CREATE INDEX idx_gene_id ON {table_name}(gene_id)")
+        self.con.execute(f"CREATE INDEX idx_tissue_id ON {table_name}(tissue_id)")
+
+    @classmethod
+    def _standardize_tissue_id(cls, tissue_id: str | int) -> str:
+        if isinstance(tissue_id, str):
+            if tissue_id.startswith("model_"):
+                tissue_id = tissue_id.replace("model_", "")
+            if tissue_id.startswith("tissue_"):
+                tissue_id = tissue_id.replace("tissue_", "")
+        return str(tissue_id)
 
     def exists(self, gene_id: str, tissue_id: str | int) -> bool:
         """
@@ -71,8 +82,8 @@ class ManifestLookup:
         Returns:
             bool: True if the combination exists, False otherwise
         """
-        result = self._query(gene_id=gene_id, tissue_id=tissue_id)
-        return len(result) > 0
+        tissue_id = self._standardize_tissue_id(tissue_id)
+        return self._exists({'gene_id': gene_id, 'tissue_id': tissue_id})
 
     def get_s3_file_path(self, gene_id: str, tissue_id: str | int) -> str:
         """
@@ -85,7 +96,7 @@ class ManifestLookup:
         Returns:
             str: Returns file_path if exists else None
         """
-        result = self._query(gene_id=gene_id, tissue_id=tissue_id)
+        result = self.query(gene_id=gene_id, tissue_id=tissue_id)
         return result[0].file_path if result else None
 
     def get_file_path(self, gene_id: str, tissue_id: str | int) -> str | None:
@@ -115,7 +126,7 @@ class ManifestLookup:
         Returns:
             list[Record]: List of records associated with the gene
         """
-        return self._query(gene_id=gene_id)
+        return self.query(gene_id=gene_id)
 
     def get_records_for_tissue(self, tissue_id: str | int) -> list[Record]:
         """
@@ -127,71 +138,9 @@ class ManifestLookup:
         Returns:
             list[Record]: List of records associated with the tissue
         """
-        return self._query(tissue_id=tissue_id)
+        return self.query(tissue_id=tissue_id)
 
-    def get_unique(self, column_name: str) -> list[str]:
-        if column_name not in {"gene_id", "tissue_id"}:
-            raise ValueError("column_name must be 'gene_id' or 'tissue_id'")
-
-        result = self.con.execute(f"SELECT DISTINCT {column_name} FROM manifest").fetchall()
-        logger.info(f"Found {len(result)} distinct values for {column_name}")
-        return [row[0] for row in result]
-
-    def _read_s3_file(self, s3_path: str) -> str:
-        try:
-            # Fetch the file from S3 to a local path
-            local_file_path = os.path.join(self.tmp_dir, s3_path)
-            os.makedirs(os.path.dirname(local_file_path), exist_ok=True)
-            # TODO: Add caching logic to avoid re-downloading files
-            logger.info(f"Downloading from S3: s3://{self.bucket}/{s3_path}")
-            with open(local_file_path, "wb") as data:
-                self.s3.download_fileobj(self.bucket, s3_path, data)
-            return local_file_path
-
-        except Exception as e:
-            logger.error(f"Failed to download from S3: {e}")
-            raise ValueError(f"S3 download failed: {e}")
-
-    def _load_file(self):
-        self.local_file_path = None
-        if self.bucket:
-            self.local_file_path = self._read_s3_file(self.manifest_file_path)
-        else:
-            self.local_file_path = self.manifest_file_path
-
-        if not self.local_file_path or not os.path.exists(self.local_file_path):
-            logger.error(f"Parquet file not found: {self.local_file_path}")
-            raise FileNotFoundError(f"Parquet file not found: {self.local_file_path}")
-
-    def _load_data(self):
-        """Load the data from parquet file."""
-        try:
-            logger.info(f"Loading parquet file: {self.local_file_path}")
-            self.con = duckdb.connect(':memory:')
-
-            # Load and index the data
-            self.con.execute(f"CREATE TABLE manifest AS SELECT * FROM '{self.local_file_path}'")
-
-            # Validate required columns exist
-            columns = self.con.execute("PRAGMA table_info(manifest)").fetchall()
-            column_names = {col[1] for col in columns}  # col[1] is the column name
-            required_columns = {'gene_id', 'tissue_id', 'file_path'}
-
-            missing_columns = required_columns - column_names
-            if missing_columns:
-                raise ValueError(f"Missing required columns: {missing_columns}")
-
-            logger.info(f"Validated schema - found columns: {column_names}")
-
-            # Create indexes for better performance
-            self.con.execute(f"CREATE INDEX idx_gene_id ON manifest(gene_id)")
-            self.con.execute(f"CREATE INDEX idx_tissue_id ON manifest(tissue_id)")
-
-        except Exception as e:
-            logger.error(f"Error loading manifest file: {e}")
-            raise ValueError(f"Error loading manifest file: {e}")
-
-    def _query(self, gene_id: str = None, tissue_id: str | int = None) -> list[Record]:
+    def query(self, gene_id: str = None, tissue_id: str | int = None) -> list[Record]:
         """
         Get the file path for a specific gene_id and tissue_id combination.
         Args:
@@ -201,51 +150,9 @@ class ManifestLookup:
         Returns:
             list[Record]: A list of Record objects matching the query
         """
-        if not (gene_id or tissue_id):
-            raise ValueError("At least one of gene_id or tissue_id must be provided.")
-
-        query = ["SELECT tissue_id, gene_id, file_path FROM manifest WHERE"]
-        params = []
-
-        if gene_id is not None:
-            query.append("gene_id = ?")
-            params.append(gene_id)
-
         if tissue_id is not None:
-            if isinstance(tissue_id, str):
-                if tissue_id.startswith("model_"):
-                    tissue_id = tissue_id.replace("model_", "")
-                if tissue_id.startswith("tissue_"):
-                    tissue_id = tissue_id.replace("tissue_", "")
-                tissue_id = int(tissue_id)
-            if params:
-                query.append("AND")
-            query.append("tissue_id = ?")
-            params.append(tissue_id)
-
-        result = self.con.execute(" ".join(query), params).fetchall()
+            tissue_id = self._standardize_tissue_id(tissue_id)
+        result = self._query({'gene_id': gene_id, 'tissue_id': tissue_id})
 
         # Convert to list of Record objects
         return [Record(*row) for row in result]
-
-    def close(self):
-        """Close the DuckDB connection."""
-        if hasattr(self, 'con') and self.con:
-            self.con.close()
-            self.con = None
-
-    def __enter__(self):
-        """Context manager entry."""
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit."""
-        self.close()
-
-    def __del__(self):
-        """Destructor to ensure connection is closed."""
-        self.close()
-
-    def __repr__(self) -> str:
-        """Representation of the ManifestLookup object."""
-        return f"ManifestLookup('{self.manifest_file_path}')"
